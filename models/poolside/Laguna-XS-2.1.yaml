@@ -4,7 +4,7 @@ meta:
   provider: "Poolside"
   description: "Poolside's 33B total / 3B activated MoE coding model with mixed sliding-window + global attention, native interleaved reasoning, and 256K context — designed for agentic coding."
   date_added: 2026-07-02
-  date_updated: 2026-07-02
+  date_updated: 2026-08-24
   difficulty: intermediate
   tasks:
     - text
@@ -14,10 +14,12 @@ meta:
     - "poolside/Laguna-M.1"
   hardware:
     h200: verified
+    mi300x: verified
+    mi355x: verified
 
 model:
   model_id: "poolside/Laguna-XS-2.1"
-  min_vllm_version: "0.21.0"
+  min_vllm_version: "0.27.1"
   architecture: moe
   parameter_count: "33B"
   active_parameters: "3B"
@@ -54,6 +56,23 @@ variants:
     precision: bf16
     vram_minimum_gb: 80
     description: "BF16 weights — fits on a single 80GB+ GPU (H100/H200/B200)"
+    hardware_overrides:
+      mi300x:
+        extra_env:
+          VLLM_ROCM_USE_AITER: "1"
+          VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "1"
+          VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: "INT4"
+        extra_args:
+          - "--attention-config"
+          - '{"backend_per_kind":{"full_attention":"ROCM_AITER_UNIFIED_ATTN","sliding_window":"ROCM_AITER_FA"}}'
+      mi355x:
+        extra_env:
+          VLLM_ROCM_USE_AITER: "1"
+          VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "1"
+          VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: "INT4"
+        extra_args:
+          - "--attention-config"
+          - '{"backend_per_kind":{"full_attention":"ROCM_AITER_UNIFIED_ATTN","sliding_window":"ROCM_AITER_FA"}}'
   fp8:
     model_id: "poolside/Laguna-XS-2.1-FP8"
     precision: fp8
@@ -100,11 +119,14 @@ guide: |
 
   ## Prerequisites
 
-  Laguna XS-2.1 support is available in vLLM 0.21.0 and later (via [PR #41129](https://github.com/vllm-project/vllm/pull/41129)).
+  Laguna XS-2.1 model support began in vLLM 0.21.0 via
+  [PR #41129](https://github.com/vllm-project/vllm/pull/41129). This recipe
+  targets vLLM 0.27.1 so its AMD command uses the same runtime selected for the
+  Laguna-S-2.1 validation.
 
   ### pip
   ```bash
-  uv pip install -U 'vllm>=0.21.0'
+  uv pip install -U 'vllm>=0.27.1'
   ```
 
   ### Docker
@@ -155,6 +177,69 @@ guide: |
       --reasoning-parser poolside_v1 \
       --host 0.0.0.0 --port 8000
   ```
+
+  ### AMD ROCm — MI300X / MI355X
+
+  XS-2.1 uses the same vLLM `LagunaForCausalLM` implementation and the same
+  serving-critical attention structure as S-2.1: 3:1 sliding/global layers, a
+  512-token sliding window, 48 configured attention heads, eight KV heads, and
+  head dimension 128. With the v0.27.1 ROCm image, TP1 was validated on both
+  MI300X and MI355X using unified AITER for full-attention layers and AITER
+  FlashAttention for sliding-window layers:
+
+  ```bash
+  export VLLM_ROCM_USE_AITER=1
+  export VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1
+  export VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4
+
+  vllm serve poolside/Laguna-XS-2.1 \
+    --trust-remote-code \
+    --tensor-parallel-size 1 \
+    --max-model-len 262144 \
+    --enable-auto-tool-choice \
+    --tool-call-parser poolside_v1 \
+    --reasoning-parser poolside_v1 \
+    --attention-config '{"backend_per_kind":{"full_attention":"ROCM_AITER_UNIFIED_ATTN","sliding_window":"ROCM_AITER_FA"}}'
+  ```
+
+  Equivalent ROCm Docker command:
+
+  ```bash
+  docker run --rm -it \
+    --cap-add=SYS_PTRACE \
+    --ipc=host \
+    --privileged=true \
+    --shm-size=128GB \
+    --network=host \
+    --device=/dev/kfd \
+    --device=/dev/dri \
+    --group-add video \
+    -e VLLM_ROCM_USE_AITER=1 \
+    -e VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1 \
+    -e VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4 \
+    vllm/vllm-openai-rocm:v0.27.1 \
+      --model poolside/Laguna-XS-2.1 \
+      --trust-remote-code \
+      --tensor-parallel-size 1 \
+      --max-model-len 262144 \
+      --enable-auto-tool-choice \
+      --tool-call-parser poolside_v1 \
+      --reasoning-parser poolside_v1 \
+      --attention-config '{"backend_per_kind":{"full_attention":"ROCM_AITER_UNIFIED_ATTN","sliding_window":"ROCM_AITER_FA"}}'
+  ```
+
+  On both MI300X and MI355X, the v0.27.1 ROCm image started at the full
+  262,144-token configured context and completed an actual 262,000-input-token
+  request plus one output token. A separate 1,048,000-token prompt was counted
+  by the server tokenizer and rejected cleanly with HTTP 400 and the model's
+  262,144-token maximum; the server remained healthy afterward.
+
+  Basic chat, reasoning separation, automatic and required tool-call parsing,
+  and prefix caching were also exercised on both systems. The second identical
+  prefix-enabled request reused 83,968 prompt tokens; the paired
+  prefix-disabled arm reported zero prefix-cache queries and hits. These are
+  correctness and feature checks, not throughput measurements, so no S-2.1
+  performance number is reused here.
 
   ## Controlling reasoning
 

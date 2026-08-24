@@ -2,9 +2,9 @@ meta:
   title: "Laguna S-2.1"
   slug: "laguna-s-2.1"
   provider: "Poolside"
-  description: "Poolside's 118B total / 8B activated MoE coding model with mixed sliding-window + global attention, native interleaved reasoning, and 256K context — the larger sibling of Laguna XS-2.1, tuned for agentic coding."
+  description: "Poolside's 118B total / 8B activated MoE coding model with mixed sliding-window + global attention, native interleaved reasoning, and 1M context — the larger sibling of Laguna XS-2.1, tuned for agentic coding."
   date_added: 2026-07-21
-  date_updated: 2026-07-22
+  date_updated: 2026-08-24
   difficulty: intermediate
   tasks:
     - text
@@ -14,15 +14,17 @@ meta:
     - "poolside/Laguna-M.1"
   hardware:
     h200: verified
+    mi300x: verified
     mi325x: verified
+    mi355x: verified
 
 model:
   model_id: "poolside/Laguna-S-2.1"
-  min_vllm_version: "0.25.0"
+  min_vllm_version: "0.27.1"
   architecture: moe
   parameter_count: "118B"
   active_parameters: "8B"
-  context_length: 262144
+  context_length: 1048576
   base_args:
     - "--trust-remote-code"
   base_env: {}
@@ -55,12 +57,34 @@ variants:
     precision: bf16
     vram_minimum_gb: 282
     description: "BF16 weights (~235GB) — needs a multi-GPU node (≥2× H200/B200, or a full HGX node)"
+    tp:
+      mi300x: 2
+      mi355x: 2
     hardware_overrides:
+      mi300x:
+        extra_env:
+          VLLM_ROCM_USE_AITER: "1"
+          VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "1"
+          VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: "INT4"
+          TRITON_CACHE_DIR: "/tmp/vllm-triton-cache"
+        extra_args:
+          - "--attention-config"
+          - '{"backend_per_kind":{"full_attention":"ROCM_ATTN","sliding_window":"ROCM_AITER_FA"}}'
+          - "--no-enable-prefix-caching"
       mi325x:
         extra_env:
           VLLM_ROCM_USE_AITER: "1"
           VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "1"
           VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: "INT4"
+      mi355x:
+        extra_env:
+          VLLM_ROCM_USE_AITER: "1"
+          VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "1"
+          VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: "INT4"
+        extra_args:
+          - "--attention-config"
+          - '{"backend_per_kind":{"full_attention":"ROCM_AITER_UNIFIED_ATTN","sliding_window":"ROCM_AITER_FA"}}'
+          - "--no-enable-prefix-caching"
   fp8:
     model_id: "poolside/Laguna-S-2.1-FP8"
     precision: fp8
@@ -126,7 +150,7 @@ guide: |
 
   ### pip
   ```bash
-  uv pip install -U 'vllm>=0.25.0'
+  uv pip install -U 'vllm>=0.27.1'
   ```
 
   ### Docker
@@ -158,8 +182,10 @@ guide: |
   pair speculative decoding with a quantized base at matching precision.
 
   > **Context length.** The BF16 checkpoint supports up to 1,048,576 tokens;
-  > the quantized checkpoints are configured for 256K. The commands below use
-  > `--max-model-len 262144`; raise or lower it to trade context for KV memory.
+  > the quantized checkpoints are configured for 256K. The general commands
+  > below cap BF16 at 262,144 tokens to reduce KV memory. The verified MI355X
+  > command deliberately omits `--max-model-len` and uses TP2 so vLLM retains
+  > the full configured context.
 
   ## Launch command
 
@@ -174,7 +200,109 @@ guide: |
     --reasoning-parser poolside_v1
   ```
 
-  ### AMD ROCm — 8× MI325X
+  ### AMD ROCm — MI355X BF16, full context
+
+  vLLM 0.27.1 can route full and sliding-window KV-cache groups to different
+  attention backends. On MI355X, unified AITER is the fastest tested
+  full-attention backend, while AITER FlashAttention avoids empty generations
+  on Laguna's sliding-window layers. The command below was validated with the
+  v0.27.1 ROCm image. TP2 is the minimum tested topology that fits the full
+  1,048,576-token context at the default 0.90 GPU-memory utilization. Do not
+  add `--max-model-len` when full context is required.
+
+  ```bash
+  export VLLM_ROCM_USE_AITER=1
+  export VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1
+  export VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4
+
+  vllm serve poolside/Laguna-S-2.1 \
+    --trust-remote-code \
+    --tensor-parallel-size 2 \
+    --enable-auto-tool-choice \
+    --tool-call-parser poolside_v1 \
+    --reasoning-parser poolside_v1 \
+    --attention-config '{"backend_per_kind":{"full_attention":"ROCM_AITER_UNIFIED_ATTN","sliding_window":"ROCM_AITER_FA"}}' \
+    --no-enable-prefix-caching
+  ```
+
+  Equivalent ROCm Docker command:
+
+  ```bash
+  docker run --rm -it \
+    --cap-add=SYS_PTRACE \
+    --ipc=host \
+    --privileged=true \
+    --shm-size=128GB \
+    --network=host \
+    --device=/dev/kfd \
+    --device=/dev/dri \
+    --group-add video \
+    -e VLLM_ROCM_USE_AITER=1 \
+    -e VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1 \
+    -e VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4 \
+    vllm/vllm-openai-rocm:v0.27.1 \
+      --model poolside/Laguna-S-2.1 \
+      --trust-remote-code \
+      --tensor-parallel-size 2 \
+      --enable-auto-tool-choice \
+      --tool-call-parser poolside_v1 \
+      --reasoning-parser poolside_v1 \
+      --attention-config '{"backend_per_kind":{"full_attention":"ROCM_AITER_UNIFIED_ATTN","sliding_window":"ROCM_AITER_FA"}}' \
+      --no-enable-prefix-caching
+  ```
+
+  On v0.27.1, a fixed prefix-off 8,192-input/1,024-output benchmark completed
+  32/32 requests with exact token lengths and zero failures after an excluded
+  warmup:
+
+  | TP | Full-context fit | Output tok/s | Mean TTFT | Mean TPOT |
+  |---:|---|---:|---:|---:|
+  | 2 | 5.59x maximum concurrency | 1,301.16 | 2,208.81 ms | 20.66 ms |
+
+  Earlier exact-main 8,000-input/1,024-output references measured 1,923.28
+  output tok/s at TP4 and 2,448.01 at TP8. Those runs used a different runtime
+  and input length, so they are topology references rather than a speedup
+  comparison with the v0.27.1 TP2 result.
+
+  TP1 failed the full-context KV-capacity gate under both tested full-attention
+  backends (about 52.6 GiB required versus 30.99 GiB available). Its separate
+  9,216-token diagnostic run is not full-context evidence. With the mapping
+  above, v0.27.1 scored 94.31% strict and flexible exact match on all 1,319
+  GSM8K prompts at 25-shot and concurrency 128, with zero empty generations.
+
+  ### AMD ROCm — MI300X BF16, full context
+
+  Unified AITER full attention failed during gfx942 graph warmup, so MI300X
+  uses vLLM's ROCm attention backend for full-attention layers and AITER
+  FlashAttention for sliding-window layers. Keep Triton's launcher cache on a
+  local filesystem; a shared WEKA-backed cache produced a missing launcher
+  race between TP ranks during validation.
+
+  ```bash
+  export VLLM_ROCM_USE_AITER=1
+  export VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1
+  export VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4
+  export TRITON_CACHE_DIR=/tmp/vllm-triton-cache
+
+  vllm serve poolside/Laguna-S-2.1 \
+    --trust-remote-code \
+    --tensor-parallel-size 2 \
+    --enable-auto-tool-choice \
+    --tool-call-parser poolside_v1 \
+    --reasoning-parser poolside_v1 \
+    --attention-config '{"backend_per_kind":{"full_attention":"ROCM_ATTN","sliding_window":"ROCM_AITER_FA"}}' \
+    --no-enable-prefix-caching
+  ```
+
+  With the v0.27.1 ROCm image, this configuration started at the full
+  1,048,576-token context and completed an actual 1,048,000-input-token
+  request plus one output token. Basic chat, reasoning separation, and
+  automatic and required tool-call parsing passed. Prefix caching also passed
+  as an opt-in diagnostic: the second identical request reused 84,000 prompt
+  tokens, while the prefix-disabled recipe arm reported zero cache queries and
+  hits. No MI300X throughput claim is made from these feature checks.
+
+  ### AMD ROCm — MI325X
 
   For FP8, the MI325X override disables AITER MoE because its blockscale kernel
   currently corrupts logits; other AITER operators remain enabled, while vLLM
