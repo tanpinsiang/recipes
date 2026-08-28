@@ -20,6 +20,8 @@ meta:
 model:
   model_id: "poolside/Laguna-XS-2.1"
   min_vllm_version: "0.27.1"
+  docker_image:
+    amd: "vllm/vllm-openai-rocm:v0.27.1"
   architecture: moe
   parameter_count: "33B"
   active_parameters: "3B"
@@ -89,6 +91,31 @@ variants:
     description: "Block-FP8 weights + FP8 KV cache — halves VRAM, fits on a single 40GB+ GPU"
     extra_env:
       VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: "0"
+    hardware_overrides:
+      mi300x:
+        extra_env:
+          VLLM_ROCM_USE_AITER: "1"
+          VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "1"
+          VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: "INT4"
+        extra_args:
+          - "--attention-config"
+          - '{"backend_per_kind":{"full_attention":"ROCM_AITER_UNIFIED_ATTN","sliding_window":"ROCM_AITER_FA"}}'
+      mi325x:
+        extra_env:
+          VLLM_ROCM_USE_AITER: "1"
+          VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "1"
+          VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: "INT4"
+        extra_args:
+          - "--attention-config"
+          - '{"backend_per_kind":{"full_attention":"ROCM_AITER_UNIFIED_ATTN","sliding_window":"ROCM_AITER_FA"}}'
+      mi355x:
+        extra_env:
+          VLLM_ROCM_USE_AITER: "1"
+          VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "1"
+          VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: "INT4"
+        extra_args:
+          - "--attention-config"
+          - '{"backend_per_kind":{"full_attention":"ROCM_AITER_UNIFIED_ATTN","sliding_window":"ROCM_AITER_FA"}}'
   nvfp4:
     model_id: "poolside/Laguna-XS-2.1-NVFP4"
     precision: nvfp4
@@ -101,6 +128,13 @@ variants:
     vram_minimum_gb: 29
     min_vllm_version: "0.22.0"
     description: "INT4 (W4A16) weights + FP8 KV cache — fits on a single 32GB+ GPU"
+    supported_hardware:
+      - h100
+      - h200
+      - b200
+      - gb200
+      - b300
+      - gb300
 
 compatible_strategies:
   - single_node_tp
@@ -155,7 +189,15 @@ guide: |
 
   Quantization is detected automatically from each checkpoint's `quantization_config`, so the launch command is identical — just swap the model ID (select the variant above). All three quantized checkpoints ship an **FP8-quantized KV cache**.
 
-  > **vLLM ≥ 0.22.0 required for the quantized variants.** The FP8 KV cache needs the per-layer attention-head fix in [vllm#42650](https://github.com/vllm-project/vllm/pull/42650); earlier versions produce scrambled output on non-Hopper GPUs. On older vLLM you can disable the FP8 KV cache with `--kv-cache-dtype-skip-layers $(seq 0 39)`.
+  > **vLLM ≥ 0.22.0 required for the quantized variants.** The FP8 KV cache
+  > needs the per-layer attention-head fix in
+  > [vllm#42650](https://github.com/vllm-project/vllm/pull/42650); earlier
+  > versions produce scrambled output on non-Hopper GPUs. On older vLLM you
+  > can disable the FP8 KV cache with `--kv-cache-dtype-skip-layers $(seq 0
+  > 39)`. On AMD, use FP8 or BF16 with v0.27.1: the XS INT4 checkpoint fails
+  > during weight-method initialization because its expert layers use an
+  > unsupported group size, so the recipe does not offer that variant for
+  > MI300X, MI325X, or MI355X.
 
   Precision-matched DFlash speculators are also available for each quantization — [DFlash-FP8](https://huggingface.co/poolside/Laguna-XS-2.1-DFlash-FP8), [DFlash-NVFP4](https://huggingface.co/poolside/Laguna-XS-2.1-DFlash-NVFP4), and [DFlash-INT4](https://huggingface.co/poolside/Laguna-XS-2.1-DFlash-INT4) — if you want to pair speculative decoding with a quantized base at matching precision.
 
@@ -247,8 +289,14 @@ guide: |
   and prefix caching were also exercised on both systems. The second identical
   prefix-enabled request reused 83,968 prompt tokens; the paired
   prefix-disabled arm reported zero prefix-cache queries and hits. These are
-  correctness and feature checks, not throughput measurements, so no S-2.1
-  performance number is reused here.
+  correctness and feature checks, not throughput measurements, so no
+  throughput claim is made here.
+
+  The FP8 checkpoint was separately validated with the same v0.27.1 image and
+  attention mapping at TP1 on MI300X and MI355X. It retained the full 262,144
+  configured context, completed an actual 262,000-input-token request plus one
+  output token, and passed chat, reasoning-parser, tool-calling, and default-on
+  prefix-cache checks.
 
   ## Controlling reasoning
 

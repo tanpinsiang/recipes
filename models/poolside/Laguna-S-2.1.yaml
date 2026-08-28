@@ -21,6 +21,8 @@ meta:
 model:
   model_id: "poolside/Laguna-S-2.1"
   min_vllm_version: "0.27.1"
+  docker_image:
+    amd: "vllm/vllm-openai-rocm:v0.27.1"
   architecture: moe
   parameter_count: "118B"
   active_parameters: "8B"
@@ -90,16 +92,39 @@ variants:
     model_id: "poolside/Laguna-S-2.1-FP8"
     precision: fp8
     vram_minimum_gb: 145
-    description: "Block-FP8 weights + FP8 KV cache (~121GB) — a hair over one 141GB H200, so TP2 (or a single 268GB B300)"
+    description: "Block-FP8 weights + FP8 KV cache (~121GB) — TP2 on MI300X/MI325X/H200, TP1 on MI355X/B300"
+    tp:
+      mi300x: 2
+      mi325x: 2
+      mi355x: 1
     extra_env:
       VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: "0"
     hardware_overrides:
+      mi300x:
+        extra_env:
+          VLLM_ROCM_USE_AITER: "1"
+          VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "1"
+          VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: "INT4"
+        extra_args:
+          - "--attention-config"
+          - '{"backend_per_kind":{"full_attention":"ROCM_ATTN","sliding_window":"ROCM_AITER_FA"}}'
       mi325x:
         extra_env:
           VLLM_ROCM_USE_AITER: "1"
           VLLM_ROCM_USE_AITER_MOE: "0"
           VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "1"
           VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: "INT4"
+        extra_args:
+          - "--attention-config"
+          - '{"backend_per_kind":{"full_attention":"ROCM_ATTN","sliding_window":"ROCM_AITER_FA"}}'
+      mi355x:
+        extra_env:
+          VLLM_ROCM_USE_AITER: "1"
+          VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "1"
+          VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: "INT4"
+        extra_args:
+          - "--attention-config"
+          - '{"backend_per_kind":{"full_attention":"ROCM_AITER_UNIFIED_ATTN","sliding_window":"ROCM_AITER_FA"}}'
   nvfp4:
     model_id: "poolside/Laguna-S-2.1-NVFP4"
     precision: nvfp4
@@ -108,8 +133,33 @@ variants:
   int4:
     model_id: "poolside/Laguna-S-2.1-INT4"
     precision: int4
-    vram_minimum_gb: 86
-    description: "INT4 (W4A16) weights + FP8 KV cache (~72GB) — fits a single 96GB+ GPU (H200/B200)"
+    vram_minimum_gb: 112
+    description: "INT4 (W4A16) weights + FP8 KV cache (~93GB) — TP1 with full context on MI300X/MI355X"
+    hardware_overrides:
+      mi300x:
+        extra_env:
+          VLLM_ROCM_USE_AITER: "1"
+          VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "1"
+          VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: "INT4"
+        extra_args:
+          - "--attention-config"
+          - '{"backend_per_kind":{"full_attention":"ROCM_ATTN","sliding_window":"ROCM_AITER_FA"}}'
+      mi325x:
+        extra_env:
+          VLLM_ROCM_USE_AITER: "1"
+          VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "1"
+          VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: "INT4"
+        extra_args:
+          - "--attention-config"
+          - '{"backend_per_kind":{"full_attention":"ROCM_ATTN","sliding_window":"ROCM_AITER_FA"}}'
+      mi355x:
+        extra_env:
+          VLLM_ROCM_USE_AITER: "1"
+          VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "1"
+          VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: "INT4"
+        extra_args:
+          - "--attention-config"
+          - '{"backend_per_kind":{"full_attention":"ROCM_AITER_UNIFIED_ATTN","sliding_window":"ROCM_AITER_FA"}}'
 
 compatible_strategies:
   - single_node_tp
@@ -168,9 +218,9 @@ guide: |
   | Variant | Checkpoint | Weights | ~Size | Fits on |
   |---------|-----------|---------|-------|---------|
   | BF16 | [Laguna-S-2.1](https://huggingface.co/poolside/Laguna-S-2.1) | BF16 | 235 GB | ≥2× H200/B200, or a full HGX node |
-  | FP8 | [Laguna-S-2.1-FP8](https://huggingface.co/poolside/Laguna-S-2.1-FP8) | Block-FP8 | 121 GB | TP2 on H200, or one B300; set `VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER=0` |
+  | FP8 | [Laguna-S-2.1-FP8](https://huggingface.co/poolside/Laguna-S-2.1-FP8) | Block-FP8 | 121 GB | TP2 on MI300X/MI325X/H200; TP1 on MI355X/B300; set `VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER=0` |
   | NVFP4 | [Laguna-S-2.1-NVFP4](https://huggingface.co/poolside/Laguna-S-2.1-NVFP4) | NVFP4 | 72 GB | single B200/B300 (Blackwell only) |
-  | INT4 | [Laguna-S-2.1-INT4](https://huggingface.co/poolside/Laguna-S-2.1-INT4) | INT4 (W4A16) | 72 GB | single H200/B200 |
+  | INT4 | [Laguna-S-2.1-INT4](https://huggingface.co/poolside/Laguna-S-2.1-INT4) | INT4 (W4A16) | 93 GB | TP1 on MI300X/MI355X; cap context on smaller-memory GPUs |
 
   Quantization is detected automatically from each checkpoint's
   `quantization_config`, so the launch command is identical — just swap the
@@ -182,11 +232,11 @@ guide: |
   [DFlash-INT4](https://huggingface.co/poolside/Laguna-S-2.1-DFlash-INT4) — to
   pair speculative decoding with a quantized base at matching precision.
 
-  > **Context length.** The BF16 checkpoint supports up to 1,048,576 tokens;
-  > the quantized checkpoints are configured for 256K. The general commands
-  > below cap BF16 at 262,144 tokens to reduce KV memory. The verified MI355X
-  > command deliberately omits `--max-model-len` and uses TP2 so vLLM retains
-  > the full configured context.
+  > **Context length.** The BF16, FP8, and INT4 checkpoints are configured for
+  > 1,048,576 tokens. The general BF16 and H200 INT4 examples below cap context
+  > at 262,144 tokens to reduce KV memory. The verified AMD commands deliberately
+  > omit `--max-model-len`: BF16 uses TP2; FP8 uses TP2 on MI300X and TP1 on
+  > MI355X; INT4 uses TP1 on both tested systems.
 
   ## Launch command
 
@@ -299,11 +349,28 @@ guide: |
   queries and hits. No MI300X throughput claim is made from these feature
   checks.
 
+  ### AMD ROCm — FP8 and INT4, full context
+
+  Select the FP8 or INT4 variant in the command builder to render the same
+  hardware-specific attention mappings. With the exact v0.27.1 ROCm image,
+  MI355X runs both variants at TP1. MI300X runs INT4 at TP1 and FP8 at TP2.
+  Every passing configuration retained the checkpoint's full 1,048,576-token
+  context, completed an actual 1,048,000-input-token request plus one output
+  token, and passed chat, reasoning-parser, automatic and required tool-call,
+  and default-on prefix-cache checks.
+
+  On MI300X, FP8 TP1 is not a full-context configuration: its 122.65 GiB loaded
+  model left 42.02 GiB for KV cache, below the 50.32 GiB required. TP2 provided
+  a 4,295,640-token cache and 4.10x full-context concurrency. The INT4 model
+  loaded in 93.54 GiB at TP1 and provided a 1,474,037-token cache with 1.41x
+  full-context concurrency.
+
   ### AMD ROCm — MI325X FP8
 
-  For FP8, the MI325X override disables AITER MoE because its blockscale kernel
-  currently corrupts logits; other AITER operators remain enabled, while vLLM
-  uses Triton MoE.
+  MI325X renders the MI300X TP2 attention mapping. Its override also disables
+  AITER MoE because the blockscale kernel has produced corrupt logits in prior
+  testing; other AITER operators remain enabled while vLLM uses Triton MoE.
+  This exact quantized arm was not separately rerun on MI325X.
 
   ### Single GPU (INT4 on H200, or NVFP4 on B200)
   ```bash
