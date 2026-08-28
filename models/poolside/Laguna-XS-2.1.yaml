@@ -4,7 +4,7 @@ meta:
   provider: "Poolside"
   description: "Poolside's 33B total / 3B activated MoE coding model with mixed sliding-window + global attention, native interleaved reasoning, and 256K context — designed for agentic coding."
   date_added: 2026-07-02
-  date_updated: 2026-08-24
+  date_updated: 2026-08-28
   difficulty: intermediate
   tasks:
     - text
@@ -58,6 +58,14 @@ variants:
     description: "BF16 weights — fits on a single 80GB+ GPU (H100/H200/B200)"
     hardware_overrides:
       mi300x:
+        extra_env:
+          VLLM_ROCM_USE_AITER: "1"
+          VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "1"
+          VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: "INT4"
+        extra_args:
+          - "--attention-config"
+          - '{"backend_per_kind":{"full_attention":"ROCM_AITER_UNIFIED_ATTN","sliding_window":"ROCM_AITER_FA"}}'
+      mi325x:
         extra_env:
           VLLM_ROCM_USE_AITER: "1"
           VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "1"
@@ -178,14 +186,15 @@ guide: |
       --host 0.0.0.0 --port 8000
   ```
 
-  ### AMD ROCm — MI300X / MI355X
+  ### AMD ROCm — MI300X / MI325X / MI355X
 
   XS-2.1 uses the same vLLM `LagunaForCausalLM` implementation and the same
   serving-critical attention structure as S-2.1: 3:1 sliding/global layers, a
   512-token sliding window, 48 configured attention heads, eight KV heads, and
-  head dimension 128. With the v0.27.1 ROCm image, TP1 was validated on both
-  MI300X and MI355X using unified AITER for full-attention layers and AITER
-  FlashAttention for sliding-window layers:
+  head dimension 128. MI325X renders the same command mapping as MI300X. With
+  the v0.27.1 ROCm image, TP1 was validated on MI300X and MI355X using unified
+  AITER for full-attention layers and AITER FlashAttention for sliding-window
+  layers:
 
   ```bash
   export VLLM_ROCM_USE_AITER=1

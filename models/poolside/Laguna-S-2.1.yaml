@@ -4,7 +4,7 @@ meta:
   provider: "Poolside"
   description: "Poolside's 118B total / 8B activated MoE coding model with mixed sliding-window + global attention, native interleaved reasoning, and 1M context — the larger sibling of Laguna XS-2.1, tuned for agentic coding."
   date_added: 2026-07-21
-  date_updated: 2026-08-24
+  date_updated: 2026-08-28
   difficulty: intermediate
   tasks:
     - text
@@ -59,6 +59,7 @@ variants:
     description: "BF16 weights (~235GB) — needs a multi-GPU node (≥2× H200/B200, or a full HGX node)"
     tp:
       mi300x: 2
+      mi325x: 2
       mi355x: 2
     hardware_overrides:
       mi300x:
@@ -66,16 +67,17 @@ variants:
           VLLM_ROCM_USE_AITER: "1"
           VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "1"
           VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: "INT4"
-          TRITON_CACHE_DIR: "/tmp/vllm-triton-cache"
         extra_args:
           - "--attention-config"
           - '{"backend_per_kind":{"full_attention":"ROCM_ATTN","sliding_window":"ROCM_AITER_FA"}}'
-          - "--no-enable-prefix-caching"
       mi325x:
         extra_env:
           VLLM_ROCM_USE_AITER: "1"
           VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "1"
           VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: "INT4"
+        extra_args:
+          - "--attention-config"
+          - '{"backend_per_kind":{"full_attention":"ROCM_ATTN","sliding_window":"ROCM_AITER_FA"}}'
       mi355x:
         extra_env:
           VLLM_ROCM_USE_AITER: "1"
@@ -84,7 +86,6 @@ variants:
         extra_args:
           - "--attention-config"
           - '{"backend_per_kind":{"full_attention":"ROCM_AITER_UNIFIED_ATTN","sliding_window":"ROCM_AITER_FA"}}'
-          - "--no-enable-prefix-caching"
   fp8:
     model_id: "poolside/Laguna-S-2.1-FP8"
     precision: fp8
@@ -221,8 +222,7 @@ guide: |
     --enable-auto-tool-choice \
     --tool-call-parser poolside_v1 \
     --reasoning-parser poolside_v1 \
-    --attention-config '{"backend_per_kind":{"full_attention":"ROCM_AITER_UNIFIED_ATTN","sliding_window":"ROCM_AITER_FA"}}' \
-    --no-enable-prefix-caching
+    --attention-config '{"backend_per_kind":{"full_attention":"ROCM_AITER_UNIFIED_ATTN","sliding_window":"ROCM_AITER_FA"}}'
   ```
 
   Equivalent ROCm Docker command:
@@ -247,8 +247,7 @@ guide: |
       --enable-auto-tool-choice \
       --tool-call-parser poolside_v1 \
       --reasoning-parser poolside_v1 \
-      --attention-config '{"backend_per_kind":{"full_attention":"ROCM_AITER_UNIFIED_ATTN","sliding_window":"ROCM_AITER_FA"}}' \
-      --no-enable-prefix-caching
+      --attention-config '{"backend_per_kind":{"full_attention":"ROCM_AITER_UNIFIED_ATTN","sliding_window":"ROCM_AITER_FA"}}'
   ```
 
   On v0.27.1, a fixed prefix-off 8,192-input/1,024-output benchmark completed
@@ -270,19 +269,17 @@ guide: |
   above, v0.27.1 scored 94.31% strict and flexible exact match on all 1,319
   GSM8K prompts at 25-shot and concurrency 128, with zero empty generations.
 
-  ### AMD ROCm — MI300X BF16, full context
+  ### AMD ROCm — MI300X / MI325X BF16, full context
 
   Unified AITER full attention failed during gfx942 graph warmup, so MI300X
   uses vLLM's ROCm attention backend for full-attention layers and AITER
-  FlashAttention for sliding-window layers. Keep Triton's launcher cache on a
-  local filesystem; a shared WEKA-backed cache produced a missing launcher
-  race between TP ranks during validation.
+  FlashAttention for sliding-window layers. MI325X renders this same
+  conservative BF16 mapping.
 
   ```bash
   export VLLM_ROCM_USE_AITER=1
   export VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1
   export VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4
-  export TRITON_CACHE_DIR=/tmp/vllm-triton-cache
 
   vllm serve poolside/Laguna-S-2.1 \
     --trust-remote-code \
@@ -290,19 +287,19 @@ guide: |
     --enable-auto-tool-choice \
     --tool-call-parser poolside_v1 \
     --reasoning-parser poolside_v1 \
-    --attention-config '{"backend_per_kind":{"full_attention":"ROCM_ATTN","sliding_window":"ROCM_AITER_FA"}}' \
-    --no-enable-prefix-caching
+    --attention-config '{"backend_per_kind":{"full_attention":"ROCM_ATTN","sliding_window":"ROCM_AITER_FA"}}'
   ```
 
   With the v0.27.1 ROCm image, this configuration started at the full
   1,048,576-token context and completed an actual 1,048,000-input-token
   request plus one output token. Basic chat, reasoning separation, and
-  automatic and required tool-call parsing passed. Prefix caching also passed
-  as an opt-in diagnostic: the second identical request reused 84,000 prompt
-  tokens, while the prefix-disabled recipe arm reported zero cache queries and
-  hits. No MI300X throughput claim is made from these feature checks.
+  automatic and required tool-call parsing passed. The prefix-cache validation
+  also passed: the second identical prefix-enabled request reused 84,000
+  prompt tokens, while the paired prefix-disabled test reported zero cache
+  queries and hits. No MI300X throughput claim is made from these feature
+  checks.
 
-  ### AMD ROCm — MI325X
+  ### AMD ROCm — MI325X FP8
 
   For FP8, the MI325X override disables AITER MoE because its blockscale kernel
   currently corrupts logits; other AITER operators remain enabled, while vLLM
